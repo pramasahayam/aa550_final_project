@@ -35,8 +35,8 @@ function [status, optval, state_history, thrust_history] = powered_descent(r0, r
 
     [z0, mu_1, mu_2] = precompute_vars(N, delta_t, m_wet, burn_rate, rho1, rho2);
     
-    S_gs = [zeros(2, 1), eye(2), zeros(2, 3)];
-    c_gs = [-tan(glideslope_angle_bound); zeros(5, 1)];
+    S = [zeros(2, 1), eye(2)];
+    c = [-tan(glideslope_angle_bound); zeros(2, 1)];
 
     omega = zeros(1, 4*N);
     for M = 4:4:4*N
@@ -44,72 +44,72 @@ function [status, optval, state_history, thrust_history] = powered_descent(r0, r
     end
 
     if strcmp(flag, 'Fuel')
+        cvx_solver sdpt3
         cvx_precision best
-        cvx_begin
+        cvx_begin quiet
             variable eta(4*(N+1), 1)
+            
+            k = 0:N;
+
+            u_matrix = reshape(eta, 4, N+1);
+            u_k = u_matrix(1:3, :);
+            sigma_k = u_matrix(4, :);
+
+            y_k = [y0 reshape(xi_batched(:) + Psi_batched * eta, 7, N)];
+
+            y_N = y_k(:, end);
+
+            z_k = y_k(7, :);
+
             minimize omega*eta(1:4*N, 1)
             subject to
-                
-            y_N = xi_batched(:, N) + Psi_batched(7*N-6:7*N, :) * eta;
-            y_N(1:6) == [rf; zeros(3, 1)];
-            y_N(7) >= log(m_dry);
-
-            for k = 0:N
-                u_k = Upsilon_batched(4*k+1:4*k+4, :) * eta;
-                norm(u_k(1:3)) <= u_k(4);
-
-                if k == 0
-                    mu_1(1) * (1 - (y0(7) - z0(1)) + 0.5*(y0(7) - z0(1))^2) ...
-                        <= u_k(4) <= mu_2(1) * (1 - (y0(7) - z0(1)));
-                else
-                    y_k = xi_batched(:, k) + Psi_batched(7*k-6:7*k, :) * eta;
+                y_N(1:6) == [rf; zeros(3, 1)];
+                y_N(7) >= log(m_dry);
     
-                    mu_1(k+1) * (1 - (y_k(7) - z0(k+1)) + 0.5*(y_k(7) - z0(k+1))^2) ...
-                        <= u_k(4) <= mu_2(k+1) * (1 - (y_k(7) - z0(k+1)));
+                norms(u_k, 2, 1) <= sigma_k;
     
-                    log(m_wet - rho2 * burn_rate * delta_t * k) ...
-                        <= y_k(7) <= log(m_wet - rho1 * burn_rate * delta_t * k);
+                mu_1' .* (1 - (z_k - z0') + 0.5 * (z_k - z0').^2) <= sigma_k <= mu_2' .* (1 - (z_k - z0'));
     
-                    norm(S_gs * y_k(1:6)) + c_gs' * y_k(1:6) <= 0;
-                end
-            end
+                log(m_wet - rho2 * burn_rate * delta_t * k) <= z_k <= log(m_wet - rho1 * burn_rate * delta_t * k);
+    
+                pos_error = y_k(1:3, :) - repmat(rf, 1, N+1);
+    
+                norms(S * pos_error, 2, 1) + c' * pos_error <= 0;
         cvx_end
 
     elseif strcmp(flag, 'Landing Error')
+        cvx_solver sdpt3
         cvx_precision best
-        cvx_begin
+        cvx_begin quiet
             variable eta(4*(N+1), 1)
 
-            y_N = xi_batched(:, N) + Psi_batched(7*N-6:7*N, :) * eta;
+            k = 0:N;
+            
+            u_matrix = reshape(eta, 4, N+1);
+            u_k = u_matrix(1:3, :);
+            sigma_k = u_matrix(4, :);
 
+            y_k = [y0 reshape(xi_batched(:) + Psi_batched * eta, 7, N)];
+
+            y_N = y_k(:, end);
+            
+            z_k = y_k(7, :);
+            
             minimize norm(y_N(1:3))
             subject to
-
-            y_N(1) == 0;
-            y_N(4:6) == zeros(3, 1);
-            y_N(7) >= log(m_dry);
-
-            for k = 0:N
-                u_k = Upsilon_batched(4*k+1:4*k+4, :) * eta;
-                norm(u_k(1:3)) <= u_k(4);
-
-                if k == 0
-                    mu_1(1) * (1 - (y0(7) - z0(1)) + 0.5*(y0(7) - z0(1))^2) ...
-                        <= u_k(4) <= mu_2(1) * (1 - (y0(7) - z0(1)));
-                else
-                    y_k = xi_batched(:, k) + Psi_batched(7*k-6:7*k, :) * eta;
-
-                    mu_1(k+1) * (1 - (y_k(7) - z0(k+1)) + 0.5*(y_k(7) - z0(k+1))^2) ...
-                        <= u_k(4) <= mu_2(k+1) * (1 - (y_k(7) - z0(k+1)));
-
-                    log(m_wet - rho2 * burn_rate * delta_t * k) ...
-                        <= y_k(7) <= log(m_wet - rho1 * burn_rate * delta_t * k);
-                    
-                    pos_error = [y_k(1:3) - y_N(1:3); zeros(3, 1)];
-
-                    norm(S_gs * pos_error) + c_gs' * (pos_error) <= 0;
-                end
-            end
+                y_N(1) == 0;
+                y_N(4:6) == 0;
+                y_N(7) >= log(m_dry);
+    
+                norms(u_k, 2, 1) <= sigma_k;
+                
+                mu_1' .* (1 - (z_k - z0') + 0.5 * (z_k - z0').^2) <= sigma_k <= mu_2' .* (1 - (z_k - z0'));
+    
+                log(m_wet - rho2 * burn_rate * delta_t * k) <= z_k <= log(m_wet - rho1 * burn_rate * delta_t * k);
+    
+                pos_error = y_k(1:3, :) - repmat(y_N(1:3), 1, N+1);
+    
+                norms(S * pos_error, 2, 1) + c' * pos_error <= 0;
         cvx_end
     end
     
